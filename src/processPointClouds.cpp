@@ -1,6 +1,8 @@
 // PCL lib Functions for processing point clouds 
 
 #include "processPointClouds.h"
+#include "quiz/cluster/kdtree.h"
+#include <unordered_set>
 
 
 //constructor:
@@ -215,5 +217,153 @@ std::vector<std::filesystem::path> ProcessPointClouds<PointT>::streamPcd(std::st
     sort(paths.begin(), paths.end());
 
     return paths;
+}
 
+
+// Custom RANSAC implementation for 3D plane segmentation
+template<typename PointT>
+std::unordered_set<int> RansacPlane(typename pcl::PointCloud<PointT>::Ptr cloud, int maxIterations, float distanceTol)
+{
+    std::unordered_set<int> inliersResult;
+    srand(time(NULL));
+    
+    while(maxIterations--)
+    {
+        std::unordered_set<int> inliers;
+        while(inliers.size() < 3)
+            inliers.insert(rand() % cloud->points.size());
+
+        auto itr = inliers.begin();
+        float x1 = cloud->points[*itr].x;
+        float y1 = cloud->points[*itr].y;
+        float z1 = cloud->points[*itr].z;
+        itr++;
+        float x2 = cloud->points[*itr].x;
+        float y2 = cloud->points[*itr].y;
+        float z2 = cloud->points[*itr].z;
+        itr++;
+        float x3 = cloud->points[*itr].x;
+        float y3 = cloud->points[*itr].y;
+        float z3 = cloud->points[*itr].z;
+
+        float A = (y2 - y1)*(z3 - z1) - (z2 - z1)*(y3 - y1);
+        float B = (z2 - z1)*(x3 - x1) - (x2 - x1)*(z3 - z1);
+        float C = (x2 - x1)*(y3 - y1) - (y2 - y1)*(x3 - x1);
+        float D = -(A*x1 + B*y1 + C*z1);
+
+        for(int index = 0; index < cloud->points.size(); index++)
+        {
+            if(inliers.count(index) > 0)
+                continue;
+
+            float x4 = cloud->points[index].x;
+            float y4 = cloud->points[index].y;
+            float z4 = cloud->points[index].z;
+
+            float d = fabs(A*x4 + B*y4 + C*z4 + D) / sqrt(A*A + B*B + C*C);
+
+            if(d <= distanceTol)
+                inliers.insert(index);
+        }
+
+        if(inliers.size() > inliersResult.size())
+            inliersResult = inliers;
+    }
+    
+    return inliersResult;
+}
+
+
+// Helper function for proximity search in 3D clustering
+template<typename PointT>
+void proximity(int indice, typename pcl::PointCloud<PointT>::Ptr cloud, std::vector<int>& cluster, KdTree* tree, float distanceTol, std::vector<bool>& processed)
+{
+    processed[indice] = true;
+    cluster.push_back(indice);
+    std::vector<float> point = {cloud->points[indice].x, cloud->points[indice].y, cloud->points[indice].z};
+    std::vector<int> nearby = tree->search(point, distanceTol);
+    for(int id : nearby)
+    {
+        if(!processed[id])
+            proximity<PointT>(id, cloud, cluster, tree, distanceTol, processed);
+    }
+}
+
+
+// Custom clustering using KD-tree for 3D points
+template<typename PointT>
+std::vector<typename pcl::PointCloud<PointT>::Ptr> ProcessPointClouds<PointT>::ClusteringCustom(typename pcl::PointCloud<PointT>::Ptr cloud, float clusterTolerance, int minSize, int maxSize)
+{
+    auto startTime = std::chrono::steady_clock::now();
+    
+    std::vector<typename pcl::PointCloud<PointT>::Ptr> clusters;
+    
+    // Build KD-tree
+    KdTree* tree = new KdTree;
+    for (int i = 0; i < cloud->points.size(); i++)
+    {
+        std::vector<float> point = {cloud->points[i].x, cloud->points[i].y, cloud->points[i].z};
+        tree->insert(point, i);
+    }
+    
+    std::vector<bool> processed(cloud->points.size(), false);
+    int i = 0;
+    
+    while(i < cloud->points.size())
+    {
+        if(processed[i])
+        {
+            i++;
+            continue;
+        }
+        std::vector<int> cluster;
+        proximity<PointT>(i, cloud, cluster, tree, clusterTolerance, processed);
+        
+        if(cluster.size() >= minSize && cluster.size() <= maxSize)
+        {
+            typename pcl::PointCloud<PointT>::Ptr cloudCluster(new pcl::PointCloud<PointT>());
+            for(int indice : cluster)
+                cloudCluster->points.push_back(cloud->points[indice]);
+            cloudCluster->width = cloudCluster->points.size();
+            cloudCluster->height = 1;
+            cloudCluster->is_dense = true;
+            clusters.push_back(cloudCluster);
+        }
+        i++;
+    }
+    
+    delete tree;
+    
+    auto endTime = std::chrono::steady_clock::now();
+    auto elapsedTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
+    std::cout << "custom clustering took " << elapsedTime.count() << " milliseconds and found " << clusters.size() << " clusters" << std::endl;
+    
+    return clusters;
+}
+
+
+// Custom plane segmentation using RANSAC
+template<typename PointT>
+std::pair<typename pcl::PointCloud<PointT>::Ptr, typename pcl::PointCloud<PointT>::Ptr> ProcessPointClouds<PointT>::SegmentPlaneCustom(typename pcl::PointCloud<PointT>::Ptr cloud, int maxIterations, float distanceThreshold)
+{
+    auto startTime = std::chrono::steady_clock::now();
+    
+    std::unordered_set<int> inliers = RansacPlane<PointT>(cloud, maxIterations, distanceThreshold);
+    
+    typename pcl::PointCloud<PointT>::Ptr obstCloud(new pcl::PointCloud<PointT>());
+    typename pcl::PointCloud<PointT>::Ptr planeCloud(new pcl::PointCloud<PointT>());
+    
+    for(int index = 0; index < cloud->points.size(); index++)
+    {
+        if(inliers.count(index))
+            planeCloud->points.push_back(cloud->points[index]);
+        else
+            obstCloud->points.push_back(cloud->points[index]);
+    }
+    
+    auto endTime = std::chrono::steady_clock::now();
+    auto elapsedTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
+    std::cout << "custom plane segmentation took " << elapsedTime.count() << " milliseconds" << std::endl;
+    
+    return std::pair<typename pcl::PointCloud<PointT>::Ptr, typename pcl::PointCloud<PointT>::Ptr>(obstCloud, planeCloud);
 }
