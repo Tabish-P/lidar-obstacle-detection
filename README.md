@@ -132,6 +132,16 @@ This project was developed progressively:
 5. **Bounding Box Detection** - Adding obstacle boundaries
 6. **Full Pipeline** - Complete streaming and detection system
 
+# Changes Made
+
+- Extended KD-Tree to 3D - Modified the KD-tree structure to handle 3D points by changing depth-based splitting from 2D (depth % 2) to 3D (depth % 3), including 3D distance calculations
+
+- Added Custom RANSAC Plane Segmentation - Implemented 3D plane segmentation that randomly samples 3 points, fits planes using the equation Ax + By + Cz + D = 0, and finds the plane with maximum inliers
+
+- Added Custom KD-Tree Clustering - Implemented Euclidean clustering using the extended 3D KD-tree for efficient neighbor searches with depth-first traversal
+
+- Updated environment.cpp - Replaced all PCL algorithm calls for cityBlock
+
 ## Learning Outcomes
 
 This project demonstrates:
